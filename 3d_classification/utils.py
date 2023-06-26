@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import torch.nn as nn
 import torch.nn.functional as F
+import torch
 
 
 def draw_confusion_graph(y_pred, y, directory):
@@ -27,18 +28,32 @@ def draw_confusion_graph(y_pred, y, directory):
 
 
 class SmoothCrossEntropyLoss(nn.Module):
-    def __init__(self, smoothing=0.0):
-        super(SmoothCrossEntropyLoss, self).__init__()
-        self.smoothing = smoothing
+    def __init__(self, label_smoothing=0.0, alpha=1., gamma=2., reduce=True):
+        super().__init__()
+        self.label_smoothing = label_smoothing
+
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduce = reduce
 
     def forward(self, input, target):
-        log_prob = F.log_softmax(input, dim=-1)
 
-        weight = input.new_ones(input.size()) * self.smoothing / (input.size(-1) - 1.)
-        weight.scatter_(-1, target.unsqueeze(-1), (1. - self.smoothing))
+        logsoftmax = torch.nn.LogSoftmax(dim=1)
 
-        loss = (-weight * log_prob).sum(dim=-1).mean()
-        return loss
+        if len(target.size()) == 1:
+            target = torch.nn.functional.one_hot(target, num_classes=input.size(-1))
+            target = target.float().cuda()
+        if self.label_smoothing > 0.0:
+            s_by_c = self.label_smoothing / len(input[0])
+            smooth = torch.zeros_like(target)
+            smooth = smooth + s_by_c
+            target = target * (1. - s_by_c) + smooth
+
+        cross_entropy_loss = torch.sum(-target * logsoftmax(input), dim=1)
+        pt = torch.exp(-cross_entropy_loss)
+        F_loss = self.alpha * (1 - pt) ** self.gamma * cross_entropy_loss
+
+        return F_loss.mean()
 
 
 def get_model(args):
@@ -50,3 +65,5 @@ def get_model(args):
         model = nets.UNet(spatial_dims=3, in_channels=1, out_channels=2, dropout=args.dropout)
     elif args.model == 'efficientnet':
         model = nets.EfficientNet(spatial_dims=3, in_channels=1, out_channels=2, dropout=args.dropout)
+
+    return model

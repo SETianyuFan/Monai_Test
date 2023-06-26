@@ -30,16 +30,16 @@ from sklearn.model_selection import KFold
 import torch.nn as nn
 import time
 import torch.multiprocessing
-from utils import get_model,SmoothCrossEntropyLoss,draw_confusion_graph
+from utils import get_model, SmoothCrossEntropyLoss, draw_confusion_graph
+
 torch.multiprocessing.set_sharing_strategy('file_system')
 torch.cuda.empty_cache()
 
 
 def main():
-
     parser = argparse.ArgumentParser(description='input args')
 
-    parser.add_argument('-d', '--data', type=str, required=False, default="/home/Data/ultrasound_breast/tdsc_crop2_5" ,
+    parser.add_argument('-d', '--data', type=str, required=False, default="/home/Data/ultrasound_breast/tdsc_crop_5",
                         help='data directory')
     parser.add_argument('-l', '--label', type=str, required=False, default='/home/Data/ultrasound_breast/labels.csv',
                         help='label csv')
@@ -63,12 +63,14 @@ def main():
 
 
     current_directory = os.getcwd()
+    print(current_directory)
     args_directory = str(args.resize) + "_" + str(args.learningrate) + "_" \
-                     + str(args.dataaugmentation) + "_" + str(args.dropout) + '_' + str(args.model) + '_data2'
-    output_directory = os.path.join(current_directory,"results", args_directory)
+                     + str(args.dataaugmentation) + "_" + str(args.dropout) + '_' + str(args.model) + '_data1'
+    output_directory = os.path.join(current_directory, "results", args_directory)
     if not os.path.exists(output_directory):
+        print("*" * 10)
         os.makedirs(output_directory)
-        
+
     # load image
     directory = args.data  # data directory
     images = [os.path.join(directory, f) for f in sorted(os.listdir(directory)) if f.endswith('.nii.gz')]
@@ -80,7 +82,6 @@ def main():
     labels.replace({'B': 0, 'M': 1}, inplace=True)
     labels = torch.nn.functional.one_hot(torch.as_tensor(labels)).float()
     labels = np.array(labels)
-
 
     train_transforms = Compose(
         [ScaleIntensity(), EnsureChannelFirst(),
@@ -97,8 +98,6 @@ def main():
 
     history_list = []
 
-
-
     kf = KFold(n_splits=5)
     for i, (train_index, val_index) in enumerate(kf.split(images)):
         start_time = time.perf_counter()
@@ -113,9 +112,9 @@ def main():
         val_loader = DataLoader(val_ds, batch_size=10, num_workers=6, pin_memory=pin_memory)
 
         # Create DenseNet121, CrossEntropyLoss and Adam optimizer
-        model = get_model(args)
+        model = get_model(args).to(device)
 
-        loss_function = torch.nn.CrossEntropyLoss()  # 多类分类问题中的交叉熵损失
+        loss_function = SmoothCrossEntropyLoss(label_smoothing=0.2)  # 多类分类问题中的交叉熵损失
         optimizer = torch.optim.Adam(model.parameters(), args.learningrate)  # 创建了一个Adam优化器
 
         best_metric = -1  # 记录最佳的指标结果
@@ -160,7 +159,6 @@ def main():
                 train_loader = DataLoader(train_ds, batch_size=10, shuffle=True, num_workers=6, pin_memory=pin_memory)
 
                 for batch_data in train_loader:
-
                     inputs, labels_cuda = batch_data[0].to(device), batch_data[1].to(device)
                     optimizer.zero_grad()  # 梯度清零
                     outputs = model(inputs)
@@ -246,7 +244,7 @@ def main():
                 best_model['val_label'].append(all_labels)
 
             # show epoch result
-            print(f"Current epoch: {epoch + 1} current auc_score: {auc:.4f}" )
+            print(f"Current epoch: {epoch + 1} current auc_score: {auc:.4f}")
             print(f"Current epoch: {epoch + 1} current accuracy: {metric:.4f} ")
             print(f"Best auc_score: {best_auc:.4f} at epoch {best_auc_epoch}")
             print(f"Best accuracy: {best_metric:.4f} at epoch {best_metric_epoch}")
@@ -303,6 +301,7 @@ def main():
     # print best auc and acc for each fold
     with open(os.path.join(output_directory, "training_history_folds.txt"), 'w') as file:
         file.write(str(history_list))
+
 
 if __name__ == "__main__":
     main()
