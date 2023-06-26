@@ -6,8 +6,6 @@ import tempfile
 import argparse
 import matplotlib.pyplot as plt
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import pandas as pd
@@ -30,49 +28,11 @@ from monai.metrics import ConfusionMatrixMetric
 from sklearn.model_selection import KFold
 # os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 import torch.nn as nn
-import monai.networks.nets as nets
 import time
 import torch.multiprocessing
+from utils import get_model,SmoothCrossEntropyLoss,draw_confusion_graph
 torch.multiprocessing.set_sharing_strategy('file_system')
 torch.cuda.empty_cache()
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-
-
-def draw_confusion_graph(y_pred, y, directory):
-    y_pred = y_pred.argmax(dim=1)
-    y = y.argmax(dim=1)
-
-    print(y.cpu().numpy())
-    print(y_pred.cpu().numpy())
-
-    cm = confusion_matrix(
-        y.cpu().numpy(),
-        y_pred.cpu().numpy(),
-    )
-    disp = ConfusionMatrixDisplay(
-        confusion_matrix=cm,
-        display_labels=["B", "M"],
-    )
-    fig, ax = plt.subplots(1, 1, facecolor='white')
-    _ = disp.plot(ax=ax)
-    plt.savefig(directory)
-    plt.close(fig)
-
-
-class SmoothCrossEntropyLoss(nn.Module):
-    def __init__(self, smoothing=0.0):
-        super(SmoothCrossEntropyLoss, self).__init__()
-        self.smoothing = smoothing
-
-    def forward(self, input, target):
-        log_prob = F.log_softmax(input, dim=-1)
-
-        weight = input.new_ones(input.size()) * self.smoothing / (input.size(-1) - 1.)
-        weight.scatter_(-1, target.unsqueeze(-1), (1. - self.smoothing))
-
-        loss = (-weight * log_prob).sum(dim=-1).mean()
-        return loss
-
 
 
 def main():
@@ -101,6 +61,14 @@ def main():
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
     print_config()
 
+
+    current_directory = os.getcwd()
+    args_directory = str(args.resize) + "_" + str(args.learningrate) + "_" \
+                     + str(args.dataaugmentation) + "_" + str(args.dropout) + '_' + str(args.model) + '_data2'
+    output_directory = os.path.join(current_directory,"results", args_directory)
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
+        
     # load image
     directory = args.data  # data directory
     images = [os.path.join(directory, f) for f in sorted(os.listdir(directory)) if f.endswith('.nii.gz')]
@@ -112,6 +80,7 @@ def main():
     labels.replace({'B': 0, 'M': 1}, inplace=True)
     labels = torch.nn.functional.one_hot(torch.as_tensor(labels)).float()
     labels = np.array(labels)
+
 
     train_transforms = Compose(
         [ScaleIntensity(), EnsureChannelFirst(),
@@ -128,12 +97,7 @@ def main():
 
     history_list = []
 
-    current_directory = os.getcwd()
-    args_directory = str(args.resize) + "_" + str(args.learningrate) + "_" \
-                     + str(args.dataaugmentation) + "_" + str(args.dropout) + '_' + str(args.model) + '_data2'
-    output_directory = os.path.join(current_directory, args_directory)
-    if not os.path.exists(output_directory):
-        os.makedirs(output_directory)
+
 
     kf = KFold(n_splits=5)
     for i, (train_index, val_index) in enumerate(kf.split(images)):
@@ -149,16 +113,7 @@ def main():
         val_loader = DataLoader(val_ds, batch_size=10, num_workers=6, pin_memory=pin_memory)
 
         # Create DenseNet121, CrossEntropyLoss and Adam optimizer
-        if args.model == 'densenet':
-            model = nets.DenseNet121(spatial_dims=3, in_channels=1, out_channels=2, dropout_prob=args.dropout).\
-                to(device)
-        elif args.model == 'resnet':
-            model = nets.resnet152(spatial_dims=3, n_input_channels=1, num_classes=2).to(device)
-        elif args.model == 'unet':
-            model = nets.UNet(spatial_dims=3, in_channels=1, out_channels=2, dropout=args.dropout).to(device)
-        elif args.model == 'efficientnet':
-            model = nets.EfficientNet(spatial_dims=3, in_channels=1, out_channels=2, dropout=args.dropout)
-
+        model = get_model(args)
 
         loss_function = torch.nn.CrossEntropyLoss()  # 多类分类问题中的交叉熵损失
         optimizer = torch.optim.Adam(model.parameters(), args.learningrate)  # 创建了一个Adam优化器
@@ -258,7 +213,6 @@ def main():
 
             val_epoch_loss /= val_data_step
             history_figure['val_loss'].append(val_epoch_loss)
-
 
             # compute AUC and find best AUC
             auc = monai.metrics.compute_roc_auc(all_labels, all_preds)
