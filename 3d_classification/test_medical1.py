@@ -44,7 +44,6 @@ def main():
     parser.add_argument('-l', '--label', type=str, required=False, default='/home/Data/ultrasound_breast/labels.csv',
                         help='label csv')
     parser.add_argument('-rs', '--resize', type=int, required=False, default=96, help='resize size')
-    # parser.add_argument('-di', '--dataincrease', type=bool, required=False, default=True, help='data increase or not')
     parser.add_argument('-ps', '--padsize', type=int, required=False, default=128, help='Pad size')
     parser.add_argument('-lr', '--learningrate', type=float, required=False, default=1e-4, help='learning rate')
     parser.add_argument('-ep', '--epochs', type=int, required=False, default=60, help="epochs")
