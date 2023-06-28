@@ -30,7 +30,7 @@ from sklearn.model_selection import KFold
 import torch.nn as nn
 import time
 import torch.multiprocessing
-from utils import get_model, SmoothCrossEntropyLoss, draw_confusion_graph
+from utils import get_model, SmoothCrossEntropyLoss, draw_confusion_graph, FocalLossCrossEntropyLoss
 
 torch.multiprocessing.set_sharing_strategy('file_system')
 torch.cuda.empty_cache()
@@ -60,14 +60,12 @@ def main():
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
     print_config()
 
-
+    # create new fold
     current_directory = os.getcwd()
-    print(current_directory)
     args_directory = str(args.resize) + "_" + str(args.learningrate) + "_" \
-                     + str(args.dataaugmentation) + "_" + str(args.dropout) + '_' + str(args.model) + '_data1'
+                     + str(args.dataaugmentation) + "_" + str(args.dropout) + '_' + str(args.model) + '_data1' + '_focal'
     output_directory = os.path.join(current_directory, "results", args_directory)
     if not os.path.exists(output_directory):
-        print("*" * 10)
         os.makedirs(output_directory)
 
     # load image
@@ -82,6 +80,7 @@ def main():
     labels = torch.nn.functional.one_hot(torch.as_tensor(labels)).float()
     labels = np.array(labels)
 
+    # transform
     train_transforms = Compose(
         [ScaleIntensity(), EnsureChannelFirst(),
          RandRotate90(prob=0.1),  # 10%的概率随机旋转90度
@@ -95,29 +94,32 @@ def main():
          SpatialPad((args.padsize, args.padsize, args.padsize), mode='constant'),
          Resize((args.resize, args.resize, args.resize))])
 
+    # data to store result
     history_list = []
 
+    # 5 cross val test
     kf = KFold(n_splits=5)
+
+    # begin train and test
     for i, (train_index, val_index) in enumerate(kf.split(images)):
         start_time = time.perf_counter()
 
         print("-" * 10, f"{i} fold", "-" * 10)
 
+        # create a validation data loader
         train_fold_images, val_fold_images = images[train_index], images[val_index]
         train_fold_labels, val_fold_labels = labels[train_index], labels[val_index]
-
-        # create a validation data loader
         val_ds = ImageDataset(image_files=val_fold_images, labels=val_fold_labels, transform=val_transforms)
         val_loader = DataLoader(val_ds, batch_size=10, num_workers=6, pin_memory=pin_memory)
 
-        # Create DenseNet121, CrossEntropyLoss and Adam optimizer
+        # Create DenseNet121, CrossEntropyLoss and Adam optimizer set loss function and optimizer
         model = get_model(args).to(device)
+        loss_function = SmoothCrossEntropyLoss(label_smoothing=0.5)
+        loss_function = FocalLossCrossEntropyLoss()
+        optimizer = torch.optim.Adam(model.parameters(), args.learningrate)
 
-        loss_function = SmoothCrossEntropyLoss(label_smoothing=0.2)  # 多类分类问题中的交叉熵损失
-        optimizer = torch.optim.Adam(model.parameters(), args.learningrate)  # 创建了一个Adam优化器
-
-        best_metric = -1  # 记录最佳的指标结果
-        best_metric_epoch = -1  # 最佳结果对应的周期
+        best_metric = -1
+        best_metric_epoch = -1
         best_auc = -1
         best_auc_epoch = -1
         best_model = {'model': [],
@@ -125,8 +127,7 @@ def main():
                       'val_pre': [],
                       'value': []}
         step = 0
-        metric_values = []  # 每个训练周期的指标结果
-
+        metric_values = []
         history_figure = {'val_auc': [],
                           'val_acc': [],
                           'val_loss': [],
@@ -135,12 +136,13 @@ def main():
 
         max_epochs = args.epochs
 
+        # start one epoch
         for epoch in range(max_epochs):
 
             print("-" * 10)
             print(f"epoch {epoch + 1}/{max_epochs}")
 
-            model.train()  # train 模式
+            model.train()
 
             epoch_loss = 0
             val_epoch_loss = 0
@@ -150,6 +152,7 @@ def main():
             data_step = 0
             val_data_step = 0
 
+            # start one augmentation batch
             for j in range(args.dataaugmentation):
 
                 # create a training data loader
@@ -157,22 +160,30 @@ def main():
                                         transform=train_transforms)
                 train_loader = DataLoader(train_ds, batch_size=10, shuffle=True, num_workers=6, pin_memory=pin_memory)
 
-                for batch_data in train_loader:
-                    inputs, labels_cuda = batch_data[0].to(device), batch_data[1].to(device)
-                    optimizer.zero_grad()  # 梯度清零
-                    outputs = model(inputs)
+                epoch_len = len(train_ds) // train_loader.batch_size
+                epoch_max = epoch_len * args.dataaugmentation
 
+                # start one batch
+                for batch_data in train_loader:
+
+                    # start a train
+                    inputs_cuda, labels_cuda = batch_data[0].to(device), batch_data[1].to(device)
+                    optimizer.zero_grad()
+                    outputs = model(inputs_cuda)
+
+                    # get acc score
                     value = torch.eq(outputs.argmax(dim=1), labels_cuda.argmax(dim=1))
                     metric_count += len(value)
                     num_correct += value.sum().item()
 
+                    # get loss value and count
                     loss = loss_function(outputs, labels_cuda)
                     loss.backward()
-                    optimizer.step()  # 更新模型的参数
+                    optimizer.step()
                     epoch_loss += loss.item()
-                    epoch_len = len(train_ds) // train_loader.batch_size
+
+                    # show step result
                     data_step += 1
-                    epoch_max = epoch_len * args.dataaugmentation
                     print(f"{data_step}/{epoch_max}/{step}/{max_epochs}, train_loss: {loss.item():.4f}")
 
             metric = num_correct / metric_count
