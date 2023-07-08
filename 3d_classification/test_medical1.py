@@ -24,13 +24,14 @@ from monai.transforms import (
     RandZoom,
     AsDiscrete,
 )
+import math
 from monai.metrics import ConfusionMatrixMetric
 from sklearn.model_selection import KFold
 # os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 import torch.nn as nn
 import time
 import torch.multiprocessing
-from utils import get_model, SmoothCrossEntropyLoss, draw_confusion_graph, FocalLossCrossEntropyLoss
+from utils import get_model, SmoothCrossEntropyLoss, draw_confusion_graph, FocalLossCrossEntropyLoss, draw_auc_graph
 
 torch.multiprocessing.set_sharing_strategy('file_system')
 torch.cuda.empty_cache()
@@ -39,11 +40,11 @@ torch.cuda.empty_cache()
 def main():
     parser = argparse.ArgumentParser(description='input args')
 
-    parser.add_argument('-d', '--data', type=str, required=False, default="/home/Data/ultrasound_breast/tdsc_crop_5",
+    parser.add_argument('-d', '--data', type=str, required=False, default="/home/Data/ultrasound_breast/tdsc_crop3_100",
                         help='data directory')
     parser.add_argument('-l', '--label', type=str, required=False, default='/home/Data/ultrasound_breast/labels.csv',
                         help='label csv')
-    parser.add_argument('-rs', '--resize', type=int, required=False, default=96, help='resize size')
+    parser.add_argument('-rs', '--resize', type=int, required=False, default=128, help='resize size')
     parser.add_argument('-ps', '--padsize', type=int, required=False, default=128, help='Pad size')
     parser.add_argument('-lr', '--learningrate', type=float, required=False, default=1e-4, help='learning rate')
     parser.add_argument('-ep', '--epochs', type=int, required=False, default=60, help="epochs")
@@ -63,8 +64,8 @@ def main():
     # create new fold
     current_directory = os.getcwd()
     args_directory = str(args.resize) + "_" + str(args.learningrate) + "_" \
-                     + str(args.dataaugmentation) + "_" + str(args.dropout) + '_' + str(args.model) + '_data1' + '_focal'
-    output_directory = os.path.join(current_directory, "results", args_directory)
+                     + str(args.dataaugmentation) + "_" + str(args.dropout) + '_' + str(args.model) + '_data1' + '_fortest1'
+    output_directory = os.path.join(current_directory, "results2", args_directory)
     if not os.path.exists(output_directory):
         os.makedirs(output_directory)
 
@@ -83,7 +84,7 @@ def main():
     # transform
     train_transforms = Compose(
         [ScaleIntensity(), EnsureChannelFirst(),
-         RandRotate90(prob=0.1),  # 10%的概率随机旋转90度
+         # RandRotate90(prob=0.1),  # 10%的概率随机旋转90度
          RandFlip(spatial_axis=0, prob=0.1),  # 10%的概率进行随机翻转
          RandZoom(min_zoom=0.9, max_zoom=1.1, prob=0.1),  # 10%的概率进行随机缩放
          SpatialPad((args.padsize, args.padsize, args.padsize), mode='constant'),
@@ -110,12 +111,12 @@ def main():
         train_fold_images, val_fold_images = images[train_index], images[val_index]
         train_fold_labels, val_fold_labels = labels[train_index], labels[val_index]
         val_ds = ImageDataset(image_files=val_fold_images, labels=val_fold_labels, transform=val_transforms)
-        val_loader = DataLoader(val_ds, batch_size=10, num_workers=6, pin_memory=pin_memory)
+        val_loader = DataLoader(val_ds, batch_size=5, num_workers=6, pin_memory=pin_memory)
 
         # Create DenseNet121, CrossEntropyLoss and Adam optimizer set loss function and optimizer
         model = get_model(args).to(device)
         loss_function = SmoothCrossEntropyLoss(label_smoothing=0.5)
-        loss_function = FocalLossCrossEntropyLoss()
+        # loss_function = FocalLossCrossEntropyLoss()
         optimizer = torch.optim.Adam(model.parameters(), args.learningrate)
 
         best_metric = -1
@@ -125,7 +126,8 @@ def main():
         best_model = {'model': [],
                       'val_label': [],
                       'val_pre': [],
-                      'value': []}
+                      'value': [],
+                      'epoch': []}
         step = 0
         metric_values = []
         history_figure = {'val_auc': [],
@@ -158,7 +160,7 @@ def main():
                 # create a training data loader
                 train_ds = ImageDataset(image_files=train_fold_images, labels=train_fold_labels,
                                         transform=train_transforms)
-                train_loader = DataLoader(train_ds, batch_size=10, shuffle=True, num_workers=6, pin_memory=pin_memory)
+                train_loader = DataLoader(train_ds, batch_size=5, shuffle=True, num_workers=6, pin_memory=pin_memory)
 
                 epoch_len = len(train_ds) // train_loader.batch_size
                 epoch_max = epoch_len * args.dataaugmentation
@@ -239,19 +241,26 @@ def main():
                 best_metric_epoch = epoch + 1
 
             # find best model and record 5 best model
-            if len(best_model['model']) < 5 or auc > min(best_model['value']):
+            if (len(best_model['model']) < 5 or auc >= min(best_model['value'])) and math.isnan(auc)==False:
+
+                print('try to write value')
 
                 if len(best_model['model']) == 5:
+                    print('exchange occured:')
                     worst_index = best_model['value'].index(min(best_model['value']))
+                    print(f'pop value: {best_model["value"][worst_index]}')
+                    print(f'pop epoch: {best_model["epoch"][worst_index]}')
                     best_model['model'].pop(worst_index)
                     best_model['value'].pop(worst_index)
                     best_model['val_pre'].pop(worst_index)
                     best_model['val_label'].pop(worst_index)
+                    best_model['epoch'].pop(worst_index)
 
                 best_model['model'].append(model)
                 best_model['value'].append(auc)
                 best_model['val_pre'].append(all_preds)
                 best_model['val_label'].append(all_labels)
+                best_model['epoch'].append(epoch)
 
             # show epoch result
             print(f"Current epoch: {epoch + 1} current auc_score: {auc:.4f}")
@@ -293,6 +302,9 @@ def main():
             torch.save(model_item.state_dict(), os.path.join(output_directory_fold, f'best_model_{i_model}.pt'))
             draw_confusion_graph(y=best_model['val_label'][i_model], y_pred=best_model['val_pre'][i_model],
                                  directory=os.path.join(output_directory_fold, f'confusion_graph_{i_model}.png'))
+            draw_auc_graph(y=best_model['val_label'][i_model], y_pred=best_model['val_pre'][i_model],
+                                 directory=os.path.join(output_directory_fold, f'AUC_graph_{i_model}.png'))
+            print(best_model['epoch'][i_model])
 
         # record best auc and acc
         history = {

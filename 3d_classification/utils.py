@@ -1,10 +1,36 @@
 import monai.networks.nets as nets
 import matplotlib.pyplot as plt
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, roc_curve, auc
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
 
+
+def draw_auc_graph(y_pred, y, directory):
+    y_pred = y_pred.argmax(dim=1)
+    y = y.argmax(dim=1)
+
+    print(y)
+    print(y_pred)
+
+    # y_pred = (y_pred > 0.5).float()
+
+    fpr, tpr, _ = roc_curve(y.cpu().numpy(), y_pred.cpu().numpy())
+    roc_auc = auc(fpr, tpr)
+
+    plt.figure()
+    lw = 2
+    plt.plot(fpr, tpr, color='darkorange',
+             lw=lw, label='ROC curve (area = %0.2f)' % roc_auc)
+    plt.plot([0, 1], [0, 1], color='navy', lw=lw, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Receiver Operating Characteristic')
+    plt.legend(loc="lower right")
+
+    plt.savefig(directory)
 
 
 def draw_confusion_graph(y_pred, y, directory):
